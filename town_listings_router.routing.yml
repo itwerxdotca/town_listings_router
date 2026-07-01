@@ -1,0 +1,12 @@
+town_listings_router.listing_page:
+  path: '/town-listings-router/{town_tid}/{category_tid}'
+  defaults:
+    _controller: '\Drupal\town_listings_router\Controller\TownListingsController::page'
+    _title_callback: '\Drupal\town_listings_router\Controller\TownListingsController::title'
+  requirements:
+    _permission: 'access content'
+    town_tid: '\d+'
+    category_tid: '\d+'
+  options:
+    _admin_route: false
+    no_breadcrumb: true

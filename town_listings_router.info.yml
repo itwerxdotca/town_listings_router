@@ -1,0 +1,9 @@
+name: 'Town Listings Router'
+type: module
+description: 'Routes combined town + listing category URLs to the listings View.'
+package: Custom
+core_version_requirement: ^10 || ^11
+dependencies:
+  - drupal:taxonomy
+  - drupal:views
+  - drupal:path_alias

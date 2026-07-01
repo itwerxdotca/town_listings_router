@@ -1,0 +1,27 @@
+services:
+  town_listings_router.alias_path_resolver:
+    class: Drupal\town_listings_router\Resolver\AliasPathResolver
+    arguments: ['@path_alias.manager']
+
+  town_listings_router.path_processor:
+    class: Drupal\town_listings_router\PathProcessor\TownListingsPathProcessor
+    arguments:
+      - '@town_listings_router.alias_path_resolver'
+      - '@entity_type.manager'
+    tags:
+      # Priority must be HIGHER than path_alias's processor (which is 100)
+      # so our processor runs first and can claim the combined town+category
+      # path before core's alias processor tries to match the town-only alias.
+      - { name: path_processor_inbound, priority: 200 }
+
+  town_listings_router.prevent_redirect_subscriber:
+    class: Drupal\town_listings_router\EventSubscriber\PreventRedirectSubscriber
+    tags:
+      # Must run before the Redirect module's RouteNormalizerRequestSubscriber.
+      - { name: event_subscriber }
+
+  town_listings_router.breadcrumb:
+    class: Drupal\town_listings_router\Breadcrumb\TownListingsBreadcrumbBuilder
+    arguments: ['@entity_type.manager']
+    tags:
+      - { name: breadcrumb_builder, priority: 1000 }
