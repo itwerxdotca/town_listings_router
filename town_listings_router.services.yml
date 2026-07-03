@@ -14,12 +14,6 @@ services:
       # path before core's alias processor tries to match the town-only alias.
       - { name: path_processor_inbound, priority: 200 }
 
-  town_listings_router.prevent_redirect_subscriber:
-    class: Drupal\town_listings_router\EventSubscriber\PreventRedirectSubscriber
-    tags:
-      # Must run before the Redirect module's RouteNormalizerRequestSubscriber.
-      - { name: event_subscriber }
-
   town_listings_router.breadcrumb:
     class: Drupal\town_listings_router\Breadcrumb\TownListingsBreadcrumbBuilder
     arguments: ['@entity_type.manager']

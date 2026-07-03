@@ -3,6 +3,7 @@ town_listings_router.listing_page:
   defaults:
     _controller: '\Drupal\town_listings_router\Controller\TownListingsController::page'
     _title_callback: '\Drupal\town_listings_router\Controller\TownListingsController::title'
+    _disable_route_normalizer: true
   requirements:
     _permission: 'access content'
     town_tid: '\d+'
