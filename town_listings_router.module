@@ -1,0 +1,23 @@
+<?php
+
+/**
+ * @file
+ * Town Listings Router module.
+ */
+
+/**
+  * Implements hook_xmlsitemap_index_links().
+  */
+ function town_listings_router_xmlsitemap_index_links($limit) {
+   \Drupal::service('town_listings_router.xmlsitemap_hooks')->indexLinks($limit);
+ }
+ 
+/**
+  * Implements hook_xmlsitemap_rebuild_clear().
+  *
+  * Intentionally empty to prevent xmlsitemap from deleting town_listing_page
+  * links during drush xmlsitemap:rebuild. Our links are non-entity based and
+  * are re-indexed via hook_xmlsitemap_index_links during cron and regenerate.
+  */
+ function town_listings_router_xmlsitemap_rebuild_clear(array $entity_type_ids, $save_custom) {
+ }

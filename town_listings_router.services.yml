@@ -19,3 +19,20 @@ services:
     arguments: ['@entity_type.manager']
     tags:
       - { name: breadcrumb_builder, priority: 1000 }
+
+  town_listings_router.outbound_path_processor:
+      class: Drupal\town_listings_router\PathProcessor\TownListingsOutboundPathProcessor
+      arguments:
+        - '@entity_type.manager'
+        - '@path_alias.manager'
+      tags:
+        - { name: path_processor_outbound, priority: 50 }
+
+  town_listings_router.xmlsitemap_hooks:
+        class: Drupal\town_listings_router\Hooks\XmlSitemapHooks
+        arguments:
+          - '@database'
+          - '@path_alias.manager'
+          - '@xmlsitemap.link_storage'
+        tags:
+          - { name: drupal.hook }
