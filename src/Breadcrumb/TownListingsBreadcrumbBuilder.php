@@ -56,7 +56,12 @@ final class TownListingsBreadcrumbBuilder implements BreadcrumbBuilderInterface 
 
     if (!$townTerm || !$categoryTerm) {
       $breadcrumb->setLinks($links);
-      $breadcrumb->setCacheMaxAge(0);
+      // Breadcrumb has no setCacheMaxAge(); it only offers the "refinable"
+      // methods (addCacheContexts, addCacheTags, mergeCacheMaxAge). Vary by
+      // route and invalidate when any term is saved, so the trail rebuilds
+      // once the missing term exists, without disabling caching entirely.
+      $breadcrumb->addCacheContexts(['route']);
+      $breadcrumb->addCacheTags(['taxonomy_term_list']);
       return $breadcrumb;
     }
 
