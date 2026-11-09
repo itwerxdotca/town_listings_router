@@ -6,18 +6,280 @@
  */
 
 /**
-  * Implements hook_xmlsitemap_index_links().
-  */
- function town_listings_router_xmlsitemap_index_links($limit) {
-   \Drupal::service('town_listings_router.xmlsitemap_hooks')->indexLinks($limit);
- }
- 
+ * The number of published items a tag needs before its page is indexed.
+ *
+ * Tag pages with fewer stay open to visitors but are kept out of search
+ * results and the sitemap.
+ */
+const TOWN_LISTINGS_ROUTER_TAG_MIN_ITEMS = 2;
+
 /**
-  * Implements hook_xmlsitemap_rebuild_clear().
-  *
-  * Intentionally empty to prevent xmlsitemap from deleting town_listing_page
-  * links during drush xmlsitemap:rebuild. Our links are non-entity based and
-  * are re-indexed via hook_xmlsitemap_index_links during cron and regenerate.
-  */
- function town_listings_router_xmlsitemap_rebuild_clear(array $entity_type_ids, $save_custom) {
- }
+ * Returns the content types routed by this module, keyed by vocabulary.
+ *
+ * Town + category pages (/province/town/category...) work the same way for
+ * each: the category's vocabulary decides which content type, category field
+ * and view (display page_2) the page lists. To route another content type,
+ * add it here.
+ *
+ * @return array
+ *   Keyed by category vocabulary ID: 'bundle' (content type),
+ *   'category_field' (its category reference field) and 'view' (view ID).
+ */
+function town_listings_router_category_types(): array {
+  return [
+    'listing_category' => [
+      'bundle' => 'listing',
+      'category_field' => 'field_listing_category',
+      'view' => 'listings',
+    ],
+    'poi_category' => [
+      'bundle' => 'point_of_interest',
+      'category_field' => 'field_poi_category',
+      'view' => 'points_of_interest',
+    ],
+  ];
+}
+
+/**
+ * Returns the content type settings for a category term.
+ *
+ * @param int $category_tid
+ *   A listing_category or poi_category term ID.
+ *
+ * @return array|null
+ *   The entry from town_listings_router_category_types() for the term's
+ *   vocabulary, or NULL if the term does not exist or is in another
+ *   vocabulary.
+ */
+function town_listings_router_category_type(int $category_tid): ?array {
+  $term = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->load($category_tid);
+  return $term ? (town_listings_router_category_types()[$term->bundle()] ?? NULL) : NULL;
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * XML Sitemap's cron does not call other modules' index hooks, so the town,
+ * tag and town + category links are kept up to date here. XML Sitemap's
+ * cron then regenerates the sitemap files when a link has changed.
+ */
+function town_listings_router_cron(): void {
+  if (\Drupal::moduleHandler()->moduleExists('xmlsitemap')) {
+    \Drupal::service('town_listings_router.xmlsitemap_hooks')->syncLinks();
+  }
+}
+
+/**
+ * Implements hook_xmlsitemap_index_links().
+ */
+function town_listings_router_xmlsitemap_index_links($limit) {
+  \Drupal::service('town_listings_router.xmlsitemap_hooks')->indexLinks($limit);
+}
+
+/**
+ * Implements hook_xmlsitemap_rebuild_clear().
+ *
+ * Intentionally empty to prevent xmlsitemap from deleting town_listing_page
+ * links during drush xmlsitemap:rebuild. Our links are non-entity based and
+ * are re-indexed via hook_xmlsitemap_index_links during cron and regenerate.
+ */
+function town_listings_router_xmlsitemap_rebuild_clear(array $entity_type_ids, $save_custom) {
+}
+
+/**
+ * Implements hook_metatags_alter().
+ *
+ * Town pages are indexed only when content is tagged with the town; the
+ * Metatag default for canadian_towns terms is noindex, so towns without
+ * content (and provinces) stay out of search results.
+ *
+ * Tag pages are indexed only when at least TOWN_LISTINGS_ROUTER_TAG_MIN_ITEMS
+ * published items have the tag.
+ *
+ * Town + category pages with no published content stay open to visitors
+ * (they invite people to add some) but are kept out of search results.
+ * Their title adds the province and their description names the places.
+ */
+function town_listings_router_metatags_alter(array &$metatags, array &$context): void {
+  $route_match = \Drupal::routeMatch();
+
+  if ($route_match->getRouteName() === 'entity.taxonomy_term.canonical') {
+    $term = $route_match->getParameter('taxonomy_term');
+    if ($term instanceof \Drupal\taxonomy\TermInterface && $term->bundle() === 'canadian_towns' && town_listings_router_town_has_content((int) $term->id())) {
+      $metatags['robots'] = 'index, follow, max-image-preview:large';
+    }
+    elseif ($term instanceof \Drupal\taxonomy\TermInterface && $term->bundle() === 'tags') {
+      $metatags['robots'] = town_listings_router_tag_item_count((int) $term->id()) >= TOWN_LISTINGS_ROUTER_TAG_MIN_ITEMS
+        ? 'index, follow, max-image-preview:large'
+        : 'noindex, follow, max-image-preview:large';
+    }
+    return;
+  }
+
+  if ($route_match->getRouteName() !== 'town_listings_router.listing_page') {
+    return;
+  }
+
+  $town_tid = (int) $route_match->getRawParameter('town_tid');
+  $category_tid = (int) $route_match->getRawParameter('category_tid');
+  $type = town_listings_router_category_type($category_tid);
+  if (!$type) {
+    return;
+  }
+
+  $has_content = town_listings_router_has_published_content($town_tid, $category_tid, $type['bundle'], $type['category_field']);
+  if (!$has_content) {
+    $metatags['robots'] = 'noindex, follow, max-image-preview:large';
+  }
+
+  // Title and description, e.g. "Bars & Pubs in Fort McMurray, AB | Towns
+  // Canada" and "Bars & Pubs in Fort McMurray, Alberta, on Towns Canada:
+  // Tavern on Main." The H1 stays "Bars & Pubs in Fort McMurray".
+  $storage = \Drupal::entityTypeManager()->getStorage('taxonomy_term');
+  $town = $storage->load($town_tid);
+  $category = $storage->load($category_tid);
+  if (!$town || !$category) {
+    return;
+  }
+  // The town first, its province (the top-level term) last.
+  $lineage = $storage->loadAllParents($town_tid);
+  $code = '';
+  foreach ($lineage as $term) {
+    if ($term->hasField('field_province_code') && !$term->get('field_province_code')->isEmpty()) {
+      $code = strtoupper(trim((string) $term->get('field_province_code')->value));
+      break;
+    }
+  }
+  $top = end($lineage);
+  $province = ($top && $top->id() != $town_tid) ? $top->label() : '';
+  $site = \Drupal::config('system.site')->get('name');
+
+  $place = $category->label() . ' in ' . $town->label();
+  $metatags['title'] = $place . ($code !== '' ? ', ' . $code : '') . ' | ' . $site;
+
+  $description = $place . ($province !== '' ? ', ' . $province : '') . ', on ' . $site;
+  if ($has_content) {
+    $description .= ': ' . town_listings_router_place_names($town_tid, $category_tid, $type['bundle'], $type['category_field']);
+  }
+  $metatags['description'] = rtrim($description, '.') . '.';
+}
+
+/**
+ * Returns the names of the places on a town + category page.
+ *
+ * Newest first, as "A", "A and B", "A, B and C", or "A, B, C and more".
+ *
+ * @param int $town_tid
+ *   The canadian_towns term ID.
+ * @param int $category_tid
+ *   The category term ID.
+ * @param string $bundle
+ *   The content type machine name.
+ * @param string $category_field
+ *   The category reference field on that content type.
+ *
+ * @return string
+ *   The names, or an empty string when there are none.
+ */
+function town_listings_router_place_names(int $town_tid, int $category_tid, string $bundle, string $category_field): string {
+  $node_storage = \Drupal::entityTypeManager()->getStorage('node');
+  $nids = $node_storage->getQuery()
+    ->accessCheck(FALSE)
+    ->condition('type', $bundle)
+    ->condition('status', 1)
+    ->condition('field_canadian_towns', $town_tid)
+    ->condition($category_field, $category_tid)
+    ->sort('created', 'DESC')
+    ->range(0, 4)
+    ->execute();
+
+  $names = [];
+  foreach ($node_storage->loadMultiple($nids) as $node) {
+    $names[] = $node->label();
+  }
+  if (count($names) > 3) {
+    return implode(', ', array_slice($names, 0, 3)) . ' and more';
+  }
+  $last = array_pop($names);
+  return $names ? implode(', ', $names) . ' and ' . $last : (string) $last;
+}
+
+/**
+ * Checks whether a town + category combination has published content.
+ *
+ * Uses the same rule as the sitemap hook (published nodes of the bundle that
+ * reference both terms), so a page is in the sitemap exactly when it is not
+ * noindexed.
+ *
+ * @param int $town_tid
+ *   The canadian_towns term ID.
+ * @param int $category_tid
+ *   The category term ID.
+ * @param string $bundle
+ *   The content type machine name.
+ * @param string $category_field
+ *   The category reference field on that content type.
+ *
+ * @return bool
+ *   TRUE if at least one published node matches.
+ */
+function town_listings_router_has_published_content(int $town_tid, int $category_tid, string $bundle = 'listing', string $category_field = 'field_listing_category'): bool {
+  $nids = \Drupal::entityTypeManager()
+    ->getStorage('node')
+    ->getQuery()
+    ->accessCheck(FALSE)
+    ->condition('type', $bundle)
+    ->condition('status', 1)
+    ->condition('field_canadian_towns', $town_tid)
+    ->condition($category_field, $category_tid)
+    ->range(0, 1)
+    ->execute();
+
+  return !empty($nids);
+}
+
+/**
+ * Checks whether published content is tagged with a town.
+ *
+ * Counts every content type in town_listings_router_category_types() (the
+ * same content the "Places in town" block lists), so a town page is
+ * indexed and in the sitemap exactly when it shows places.
+ *
+ * @param int $town_tid
+ *   The canadian_towns term ID.
+ *
+ * @return bool
+ *   TRUE if at least one published node references the town.
+ */
+function town_listings_router_town_has_content(int $town_tid): bool {
+  $nids = \Drupal::entityTypeManager()
+    ->getStorage('node')
+    ->getQuery()
+    ->accessCheck(FALSE)
+    ->condition('type', array_column(town_listings_router_category_types(), 'bundle'), 'IN')
+    ->condition('status', 1)
+    ->condition('field_canadian_towns', $town_tid)
+    ->range(0, 1)
+    ->execute();
+
+  return !empty($nids);
+}
+
+/**
+ * Counts the published items that have a tag.
+ *
+ * Reads the taxonomy index, the same source as the "Tagged: ..." blocks on
+ * tag pages (tc_tagged_content view) and the sitemap's tag links, so a tag
+ * page is indexed and in the sitemap exactly when it lists enough items.
+ *
+ * @param int $tag_tid
+ *   The tags term ID.
+ *
+ * @return int
+ *   The number of published nodes with the tag.
+ */
+function town_listings_router_tag_item_count(int $tag_tid): int {
+  return (int) \Drupal::database()
+    ->query('SELECT COUNT(DISTINCT nid) FROM {taxonomy_index} WHERE tid = :tid', [':tid' => $tag_tid])
+    ->fetchField();
+}

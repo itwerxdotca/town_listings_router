@@ -8,7 +8,8 @@ use Drupal\town_listings_router\Resolver\AliasPathResolverInterface;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
- * Processes incoming paths to match town + listing category combinations.
+ * Processes incoming paths to match town + category combinations (listing
+ * and point of interest categories).
  *
  * Given a URL like /british-columbia/gabriola/food-beverage/restaurants,
  * this processor:
@@ -57,7 +58,11 @@ final class TownListingsPathProcessor implements InboundPathProcessorInterface {
      $townAlias = '/' . implode('/', array_slice($parts, 0, $split));
      $categoryAlias = '/' . implode('/', array_slice($parts, $split));
      $townTid = $this->resolveAlias($townAlias, 'canadian_towns');
-     $categoryTid = $this->resolveAlias($categoryAlias, 'listing_category');
+     // Any category vocabulary in town_listings_router_category_types().
+     $categoryTid = NULL;
+     foreach (array_keys(town_listings_router_category_types()) as $vocabulary) {
+       $categoryTid ??= $this->resolveAlias($categoryAlias, $vocabulary);
+     }
      if ($townTid && $categoryTid) {
        $request->attributes->set('_disable_route_normalizer', TRUE);
        return "/town-listings-router/{$townTid}/{$categoryTid}";
