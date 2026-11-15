@@ -87,11 +87,235 @@ function town_listings_router_xmlsitemap_rebuild_clear(array $entity_type_ids, $
 }
 
 /**
+ * Implements hook_page_attachments().
+ *
+ * Adds to the page's Schema.org graph (built by schema_metatag from the
+ * Metatag tags), so everything stays in one @graph:
+ * - Town + category pages with places: an ItemList of the places shown,
+ *   pointing to the page's WebPage.
+ * - Listing and point of interest pages: the place's @id, its WebPage, and
+ *   the town, province and country it is in.
+ * - Town and province pages: the place's @id, its WebPage, and the province
+ *   and country it is in.
+ *
+ * The additions are handed over the way Metatag hands over its Schema.org
+ * tags (meta elements marked "schema_metatag"), which
+ * schema_metatag_page_attachments_alter() collects into the graph by group:
+ * the place additions go into Metatag's own "schema_place" group, so they
+ * land on the same node as its name, address and coordinates.
+ */
+function town_listings_router_page_attachments(array &$attachments): void {
+  if (!\Drupal::moduleHandler()->moduleExists('schema_metatag')) {
+    return;
+  }
+  $route_match = \Drupal::routeMatch();
+  $cache = \Drupal\Core\Cache\CacheableMetadata::createFromRenderArray($attachments);
+
+  switch ($route_match->getRouteName()) {
+    case 'town_listings_router.listing_page':
+      $item_list = town_listings_router_schema_item_list((int) $route_match->getRawParameter('town_tid'), (int) $route_match->getRawParameter('category_tid'), $cache);
+      if ($item_list) {
+        town_listings_router_schema_attach($attachments, 'town_listings_router_item_list', $item_list);
+      }
+      break;
+
+    case 'entity.node.canonical':
+      $node = $route_match->getParameter('node');
+      $bundles = array_column(town_listings_router_category_types(), 'bundle');
+      if ($node instanceof \Drupal\node\NodeInterface && in_array($node->bundle(), $bundles, TRUE)) {
+        $page = town_listings_router_schema_page_url($cache);
+        $place = [
+          '@id' => $page . '/#place',
+          'mainEntityOfPage' => ['@id' => $page . '/#webpage'],
+        ];
+        $town = $node->hasField('field_canadian_towns') ? $node->get('field_canadian_towns')->entity : NULL;
+        if ($town instanceof \Drupal\taxonomy\TermInterface) {
+          $place['containedInPlace'] = town_listings_router_schema_town($town, $cache);
+        }
+        town_listings_router_schema_attach($attachments, 'schema_place', $place);
+      }
+      break;
+
+    case 'entity.taxonomy_term.canonical':
+      $term = $route_match->getParameter('taxonomy_term');
+      if ($term instanceof \Drupal\taxonomy\TermInterface && $term->bundle() === 'canadian_towns') {
+        $page = town_listings_router_schema_page_url($cache);
+        town_listings_router_schema_attach($attachments, 'schema_place', [
+          '@id' => $page . '/#place',
+          'mainEntityOfPage' => ['@id' => $page . '/#webpage'],
+          'containedInPlace' => town_listings_router_schema_contained_in($term, $cache),
+        ]);
+      }
+      break;
+  }
+
+  $cache->applyTo($attachments);
+}
+
+/**
+ * Hands Schema.org properties to schema_metatag for the page's @graph.
+ *
+ * @param array $attachments
+ *   The page attachments.
+ * @param string $group
+ *   The graph node to add to: a Metatag group such as "schema_place", or a
+ *   new group for a node of its own.
+ * @param array $properties
+ *   Schema.org property values keyed by property name; empty ones are left
+ *   out.
+ */
+function town_listings_router_schema_attach(array &$attachments, string $group, array $properties): void {
+  foreach (array_filter($properties) as $name => $content) {
+    $attachments['#attached']['html_head'][] = [
+      [
+        '#tag' => 'meta',
+        '#attributes' => [
+          'name' => $name,
+          'content' => $content,
+          'group' => $group,
+          'schema_metatag' => TRUE,
+        ],
+      ],
+      'town_listings_router_' . $group . '_' . $name,
+    ];
+  }
+}
+
+/**
+ * Returns the current page's absolute URL, without a trailing slash.
+ *
+ * The same URL as the [current-page:url] token in the WebPage's @id
+ * ([current-page:url]/#webpage), so the @ids built from it match.
+ */
+function town_listings_router_schema_page_url(\Drupal\Core\Cache\CacheableMetadata $cache): string {
+  $url = \Drupal\Core\Url::fromRoute('<current>', [], ['absolute' => TRUE])->toString(TRUE);
+  $cache->addCacheableDependency($url);
+  return rtrim($url->getGeneratedUrl(), '/');
+}
+
+/**
+ * Builds the ItemList of the places on a town + category page.
+ *
+ * Uses the same view display and arguments as the page, so the list holds
+ * exactly the places shown, in the order shown.
+ *
+ * @return array
+ *   The ItemList properties, or an empty array when the page has no places.
+ */
+function town_listings_router_schema_item_list(int $town_tid, int $category_tid, \Drupal\Core\Cache\CacheableMetadata $cache): array {
+  $type = town_listings_router_category_type($category_tid);
+  if (!$type) {
+    return [];
+  }
+  $cache->addCacheTags(['node_list'])->addCacheContexts(['url.query_args']);
+
+  $elements = [];
+  foreach (views_get_view_result($type['view'], 'page_2', (string) $town_tid, (string) $category_tid) as $row) {
+    $node = $row->_entity ?? NULL;
+    if ($node instanceof \Drupal\node\NodeInterface && $node->isPublished()) {
+      $url = $node->toUrl('canonical', ['absolute' => TRUE])->toString(TRUE);
+      $cache->addCacheableDependency($url);
+      $elements[] = [
+        '@type' => 'ListItem',
+        'position' => count($elements) + 1,
+        'name' => $node->label(),
+        'url' => $url->getGeneratedUrl(),
+      ];
+    }
+  }
+  if (!$elements) {
+    return [];
+  }
+
+  $page = town_listings_router_schema_page_url($cache);
+  $storage = \Drupal::entityTypeManager()->getStorage('taxonomy_term');
+  $town = $storage->load($town_tid);
+  $category = $storage->load($category_tid);
+
+  return [
+    '@type' => 'ItemList',
+    '@id' => $page . '/#itemlist',
+    'name' => ($category && $town) ? $category->label() . ' in ' . $town->label() : '',
+    'mainEntityOfPage' => ['@id' => $page . '/#webpage'],
+    'numberOfItems' => count($elements),
+    'itemListElement' => $elements,
+  ];
+}
+
+/**
+ * Builds the Schema.org City for a town term, with what it is in.
+ *
+ * Its @id matches the one on the town's own page ([town URL]/#place).
+ */
+function town_listings_router_schema_town(\Drupal\taxonomy\TermInterface $town, \Drupal\Core\Cache\CacheableMetadata $cache): array {
+  $cache->addCacheableDependency($town);
+  $url = $town->toUrl('canonical', ['absolute' => TRUE])->toString(TRUE);
+  $cache->addCacheableDependency($url);
+  $town_url = rtrim($url->getGeneratedUrl(), '/');
+
+  return [
+    '@type' => 'City',
+    '@id' => $town_url . '/#place',
+    'name' => $town->label(),
+    'url' => $town_url,
+    'containedInPlace' => town_listings_router_schema_contained_in($town, $cache),
+  ];
+}
+
+/**
+ * Returns what a town or province term is in, for containedInPlace.
+ *
+ * A town (a term with a parent) is in its province, the top-level term,
+ * which is in Canada. A province (a top-level term) is in Canada.
+ */
+function town_listings_router_schema_contained_in(\Drupal\taxonomy\TermInterface $term, \Drupal\Core\Cache\CacheableMetadata $cache): array {
+  $canada = [
+    '@type' => 'Country',
+    'name' => 'Canada',
+    'sameAs' => 'https://en.wikipedia.org/wiki/Canada',
+  ];
+
+  // The term first, its province (the top-level term) last.
+  $lineage = \Drupal::entityTypeManager()->getStorage('taxonomy_term')->loadAllParents($term->id());
+  $province = end($lineage);
+  if (!$province || $province->id() == $term->id()) {
+    return $canada;
+  }
+  $cache->addCacheableDependency($province);
+  $url = $province->toUrl('canonical', ['absolute' => TRUE])->toString(TRUE);
+  $cache->addCacheableDependency($url);
+  $province_url = rtrim($url->getGeneratedUrl(), '/');
+
+  // Wikipedia articles for the provinces and territories, which have the
+  // same titles as the province terms.
+  $known = [
+    'Alberta', 'British Columbia', 'Manitoba', 'New Brunswick',
+    'Newfoundland and Labrador', 'Northwest Territories', 'Nova Scotia',
+    'Nunavut', 'Ontario', 'Prince Edward Island', 'Quebec', 'Saskatchewan',
+    'Yukon',
+  ];
+  $name = $province->label();
+
+  $area = [
+    '@type' => 'AdministrativeArea',
+    '@id' => $province_url . '/#place',
+    'name' => $name,
+    'url' => $province_url,
+  ];
+  if (in_array($name, $known, TRUE)) {
+    $area['sameAs'] = 'https://en.wikipedia.org/wiki/' . str_replace(' ', '_', $name);
+  }
+  $area['containedInPlace'] = $canada;
+  return $area;
+}
+
+/**
  * Implements hook_metatags_alter().
  *
  * Town pages are indexed only when content is tagged with the town; the
  * Metatag default for canadian_towns terms is noindex, so towns without
- * content (and provinces) stay out of search results.
+ * content (and provinces) stay out of search results. Province pages get
+ * the Schema.org type AdministrativeArea instead of the default City.
  *
  * Tag pages are indexed only when at least TOWN_LISTINGS_ROUTER_TAG_MIN_ITEMS
  * published items have the tag.
@@ -105,6 +329,11 @@ function town_listings_router_metatags_alter(array &$metatags, array &$context):
 
   if ($route_match->getRouteName() === 'entity.taxonomy_term.canonical') {
     $term = $route_match->getParameter('taxonomy_term');
+    // A province or territory (a top-level towns term) is not a City.
+    if ($term instanceof \Drupal\taxonomy\TermInterface && $term->bundle() === 'canadian_towns' && isset($metatags['schema_place_type'])
+      && !\Drupal::entityTypeManager()->getStorage('taxonomy_term')->loadParents($term->id())) {
+      $metatags['schema_place_type'] = 'AdministrativeArea';
+    }
     if ($term instanceof \Drupal\taxonomy\TermInterface && $term->bundle() === 'canadian_towns' && town_listings_router_town_has_content((int) $term->id())) {
       $metatags['robots'] = 'index, follow, max-image-preview:large';
     }
